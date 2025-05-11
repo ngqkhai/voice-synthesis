@@ -83,8 +83,9 @@ class VoiceMessageBroker:
         collection_id = data.get("collection_id")
         # Synthesize each scene with voiceover and collect results
         scenes = script.get("scenes", [])
-        voice_id = os.getenv("DEFAULT_VOICE_ID", "en-US-Neural2-A")
-        language = os.getenv("DEFAULT_LANGUAGE", "en-US")
+        voice_name = script.get("voice", "Neural2-A")
+        language = script.get("language", "en-US")
+        voice_id = language + "-" + voice_name
         speed = float(os.getenv("DEFAULT_SPEED", "1"))
         scene_results = []
         async with httpx.AsyncClient() as client:
@@ -96,22 +97,49 @@ class VoiceMessageBroker:
                 if not scene_text:
                     logger.warning(f"Scene {scene_id} has empty script, skipping")
                     continue
-                # Call the local synthesize API for this scene
-                try:
-                    res = await client.post(
-                        f"{VOICE_SERVICE_URL}/api/v1/voice/synthesize",
-                        json={
-                            "text": scene_text,
-                            "voice_id": voice_id,
-                            "language": language,
-                            "speed": speed
-                        }
-                    )
-                    res.raise_for_status()
-                    resp_json = res.json()
-                except Exception as http_err:
-                    logger.error(f"HTTP error synthesizing scene {scene_id}: {str(http_err)}")
-                    continue
+                # Call the local synthesize API for this scene with retry/backoff
+                resp_json = None
+                timeout = httpx.Timeout(10.0, read=10.0)
+                max_retries = 3
+                for attempt in range(1, max_retries + 1):
+                    try:
+                        logger.info(f"Attempt {attempt}: POST {VOICE_SERVICE_URL}/api/v1/voice/synthesize for scene {scene_id}")
+                        res = await client.post(
+                            f"{VOICE_SERVICE_URL}/api/v1/voice/synthesize",
+                            json={
+                                "text": scene_text,
+                                "voice_id": voice_id,
+                                "language": language,
+                                "speed": speed
+                            },
+                            timeout=timeout
+                        )
+                        res.raise_for_status()
+                        resp_json = res.json()
+                        break
+                    except httpx.HTTPStatusError as status_err:
+                        # Don't retry on 4xx errors
+                        logger.error(
+                            f"HTTP status {status_err.response.status_code} error for scene {scene_id}: {status_err.response.text}"
+                        )
+                        break
+                    except (httpx.RequestError, httpx.TimeoutException) as req_err:
+                        logger.warning(
+                            f"Request error on attempt {attempt} for scene {scene_id}: {repr(req_err)}"
+                        )
+                        if attempt < max_retries:
+                            backoff = 2 ** attempt
+                            logger.info(f"Waiting {backoff}s before retry...")
+                            await asyncio.sleep(backoff)
+                            continue
+                        else:
+                            logger.error(f"Max retries reached for scene {scene_id}. Skipping.")
+                            break
+                    except Exception:
+                        logger.exception(f"Unexpected error synthesizing scene {scene_id}")
+                        break
+                if not resp_json:
+                    continue  # Skip if all attempts failed
                 # Collect result for this scene in order
                 scene_results.append({
                     "scene_id": scene_id,

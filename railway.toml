@@ -1,0 +1,17 @@
+[build]
+builder = "nixpacks"
+buildCommand = "pip install -r requirements.txt"
+
+[deploy]
+startCommand = "uvicorn main:app --host 0.0.0.0 --port $PORT"
+healthcheckPath = "/api/v1/voice/languages"
+healthcheckTimeout = 300
+
+[environments]
+    [environments.production]
+    numReplicas = 1
+    memory = "512MB"
+    
+    [environments.development]
+    numReplicas = 1
+    memory = "512MB" 
